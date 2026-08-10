@@ -10,6 +10,7 @@ import matplotlib.dates as mdates
 import re
 import tempfile
 import os
+import pandas as pd
 
 # ==========================================
 # 1. Page Configuration & Professional Branding
@@ -278,7 +279,24 @@ if uploaded_files:
             ax.set_xlabel("Time (Seconds)")
             fig.colorbar(im, ax=ax, label="Power (dB)")
             st.pyplot(fig)
-
+            # --- STFT 數據匯出引擎 (Data Export Engine) ---
+            st.divider()
+            st.subheader("💾 Export STFT Matrix for Statistical Analysis")
+            
+            # 將矩陣轉置 (.T)，讓 Row = Time, Column = Frequency
+            df_stft = pd.DataFrame(psd_stft.T, index=t_stft, columns=np.round(f_stft, 2))
+            df_stft.index.name = "Time (Seconds)"
+            
+            # 轉換為 CSV 格式 (utf-8 編碼確保跨國系統不亂碼)
+            csv_stft = df_stft.to_csv().encode('utf-8')
+            
+            st.download_button(
+                label="📥 Download STFT Raw Power Matrix (CSV)",
+                data=csv_stft,
+                file_name="STFT_RawPower_Matrix.csv",
+                mime="text/csv",
+                help="Rows represent time windows (seconds), Columns represent frequency bins (Hz). Values are Raw Power (not dB) to facilitate accurate downstream statistical averaging and relative band power calculations."
+            )
         # ------------------------------------------
         # TAB 4: Multitaper DSA (Legacy Pipeline)
         # ------------------------------------------
@@ -299,9 +317,24 @@ if uploaded_files:
                 plt.xticks(rotation=30)
                 fig.colorbar(im, ax=ax, label='Power (dB)')
                 st.pyplot(fig)
+                # --- DSA 數據匯出引擎 (Data Export Engine) ---
+                st.divider()
+                st.subheader("💾 Export Multitaper DSA Matrix for Statistical Analysis")
+                # 將絕對時間轉換為容易閱讀的字串格式
+                time_strs = [t.strftime('%Y-%m-%d %H:%M:%S') for t in all_times_mne]
+                # 建立 DataFrame，Row = Absolute Time, Column = Frequency
+                df_dsa = pd.DataFrame(concat_power.T, index=time_strs, columns=np.round(freqs_mne, 2))
+                df_dsa.index.name = "Absolute Time"
+                csv_dsa = df_dsa.to_csv().encode('utf-8')
+                st.download_button(
+                    label="📥 Download Multitaper DSA Raw Power Matrix (CSV)",
+                    data=csv_dsa,
+                    file_name="Multitaper_DSA_RawPower_Matrix.csv",
+                    mime="text/csv",
+                    help="Rows represent absolute clinical time, Columns represent frequency bins (Hz). Values are Raw Power (not dB)."
+                )        
             else:
                 st.warning("Multitaper arrays could not be generated. Check temporal continuity metrics.")
-                
         # ------------------------------------------
         # TAB 5 & 6: Research Structural Holes (Future Modules)
         # ------------------------------------------
