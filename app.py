@@ -192,21 +192,20 @@ if uploaded_files:
         fig.colorbar(im, ax=axes.ravel().tolist(), label="Power (dB)")
         st.pyplot(fig)
 
-    # ---------------------------
+# ---------------------------
     # TAB 4: Phase-Amplitude Coupling (PAC - Tort's MI)
     # ---------------------------
     with tab_pac:
         st.header("🌊 Cross-Frequency Phase-Amplitude Coupling (Tort's MI)")
         st.markdown(f"**Analyzing current ROI**: `{start_sec}s` to `{start_sec + actual_epoch_len}s`")
         
-        # 由於 PAC 運算極度耗資源，建立單一導聯選擇器，避免網頁崩潰
         pac_ch = st.selectbox("🎯 Select Target Channel for PAC Analysis", selected_channels)
         
         if st.button("🚀 Calculate PAC for current ROI"):
             with st.spinner("Hilbert Transform and Phase Binning in progress..."):
                 raw_roi_sig = sliced_signals[pac_ch]
                 
-                # 1. 建立與 MATLAB 完全一致的頻段濾波
+                # 1. 學術級 Nyquist 篩選防禦
                 bands = {
                     'Delta': (0.5, 4),
                     'Theta': (4, 8),
@@ -215,37 +214,42 @@ if uploaded_files:
                 }
                 filtered_sigs = {}
                 nyq = fs / 2
-                for b_name, (low, high) in bands.items():
-                    b, a = butter(3, [low/nyq, high/nyq], btype='bandpass')
-                    filtered_sigs[b_name] = filtfilt(b, a, raw_roi_sig)
+                valid_bands = []
                 
-                # 2. 希爾伯特轉換 (Hilbert)
-                phases = {}
-                amps = {}
-                # 對齊 MATLAB 的平滑器 fir1(12, 0.1) -> Python firwin 13 taps
+                for b_name, (low, high) in bands.items():
+                    if high >= nyq - 0.5:
+                        st.warning(f"🚫 **頻段失效警告**: {b_name} 頻段上限 ({high}Hz) 已逼近或超過資料物理極限 Nyquist ({nyq:.1f}Hz)。為確保科學嚴謹性，該頻段 PAC 運算已自動捨棄。")
+                    else:
+                        b, a = butter(3, [low/nyq, high/nyq], btype='bandpass')
+                        filtered_sigs[b_name] = filtfilt(b, a, raw_roi_sig)
+                        valid_bands.append(b_name)
+                
+                # 2. 希爾伯特轉換與振幅平滑
+                phases, amps = {}, {}
                 b_fir = firwin(13, 0.1) 
                 
                 for b_name, sig in filtered_sigs.items():
                     analytic = hilbert(sig)
                     phases[b_name] = np.angle(analytic)
-                    # 振幅平滑處理
-                    amp_raw = np.abs(analytic)
-                    amps[b_name] = filtfilt(b_fir, [1.0], amp_raw)
+                    amps[b_name] = filtfilt(b_fir, [1.0], np.abs(analytic))
                 
-                # 轉換 Phase 為 0~360 度
                 phase_deg = {b: np.round(np.mod(phases[b], 2*np.pi) * 180 / np.pi) for b in phases}
                 
-                # 3. 組合設定 (與 MATLAB 一致的 6 組)
-                pairs = [
+                # 3. 組合設定 (僅篩選科學有效的配對)
+                all_pairs = [
                     ('Delta', 'Theta'), ('Delta', 'Alpha'), ('Delta', 'Beta'),
                     ('Theta', 'Alpha'), ('Theta', 'Beta'), ('Alpha', 'Beta')
                 ]
+                valid_pairs = [pair for pair in all_pairs if pair[0] in valid_bands and pair[1] in valid_bands]
                 
-                mi_results = {}
-                dist_results = {}
+                if not valid_pairs:
+                    st.error("❌ 採樣率過低，沒有足夠的有效頻段組合可進行 PAC 運算。")
+                    st.stop()
                 
-                # 4. 執行 Tort's 演算法核心 (72 Bins)
-                for p_band, a_band in pairs:
+                mi_results, dist_results = {}, {}
+                
+                # 4. Tort's 演算法核心
+                for p_band, a_band in valid_pairs:
                     ph = phase_deg[p_band]
                     am = amps[a_band]
                     
@@ -256,50 +260,49 @@ if uploaded_files:
                             p_dist[k-1] = np.mean(am[idx])
                             
                     p_dist = np.nan_to_num(p_dist)
-                    if np.sum(p_dist) > 0:
-                        p_dist = p_dist / np.sum(p_dist)
+                    if np.sum(p_dist) > 0: p_dist = p_dist / np.sum(p_dist)
                         
-                    # 循環平滑處理 (對應 MATLAB 的 Buffer Average)
                     P = uniform_filter1d(p_dist, size=13, mode='wrap')
-                    if np.sum(P) > 0:
-                        P = P / np.sum(P)
+                    if np.sum(P) > 0: P = P / np.sum(P)
                         
-                    # 計算 Modulation Index
                     D = np.log(72) + np.sum(P * np.log(P + 1e-10))
                     MI = D / np.log(72)
                     
                     mi_results[f"{p_band}_{a_band}"] = MI
                     dist_results[f"{p_band}_{a_band}"] = P
                 
-                # 5. 渲染高解析度結果 (與 MATLAB 視覺邏輯對齊)
+                # 5. 動態渲染高解析度結果
                 st.subheader(f"Coupling Distribution & MI (Channel: {pac_ch})")
                 
+                # 根據剩餘的有效組合數量動態生成畫布
                 fig, axes = plt.subplots(2, 3, figsize=(15, 8))
                 axes = axes.flatten()
+                x_axis = np.linspace(-360, 360, 144) 
                 
-                x_axis = np.linspace(-360, 360, 144) # 模擬 MATLAB 的 -2π ~ 2π 雙週期
-                
-                for i, (pair_name, MI_val) in enumerate(mi_results.items()):
-                    P_single = dist_results[pair_name]
-                    # 複製兩次，形成兩個週期，完美重現 MATLAB 的 144 points (72x2)
-                    P_double = np.tile(P_single, 2) 
-                    
-                    axes[i].plot(x_axis, P_double, color='#2c3e50', lw=2)
-                    axes[i].fill_between(x_axis, P_double, np.min(P_double)*0.9, color='#3498db', alpha=0.3)
-                    
-                    axes[i].set_title(f"{pair_name}\nMI = {MI_val:.5f}", fontweight='bold', fontsize=12)
-                    axes[i].set_xticks([-360, -180, 0, 180, 360])
-                    axes[i].set_xticklabels(['-2π', '-π', '0', 'π', '2π'])
-                    axes[i].set_ylim(np.min(P_double)*0.9, np.max(P_double)*1.1)
-                    axes[i].grid(True, linestyle='--', alpha=0.5)
-                    
-                    if i >= 3: axes[i].set_xlabel("Phase")
-                    if i % 3 == 0: axes[i].set_ylabel("Normalized Amplitude")
-                    
+                for i in range(6):
+                    if i < len(valid_pairs):
+                        pair_name = f"{valid_pairs[i][0]}_{valid_pairs[i][1]}"
+                        MI_val = mi_results[pair_name]
+                        P_double = np.tile(dist_results[pair_name], 2) 
+                        
+                        axes[i].plot(x_axis, P_double, color='#2c3e50', lw=2)
+                        axes[i].fill_between(x_axis, P_double, np.min(P_double)*0.9, color='#3498db', alpha=0.3)
+                        
+                        axes[i].set_title(f"{pair_name}\nMI = {MI_val:.5f}", fontweight='bold', fontsize=12)
+                        axes[i].set_xticks([-360, -180, 0, 180, 360])
+                        axes[i].set_xticklabels(['-2π', '-π', '0', 'π', '2π'])
+                        axes[i].set_ylim(np.min(P_double)*0.9, np.max(P_double)*1.1)
+                        axes[i].grid(True, linestyle='--', alpha=0.5)
+                        
+                        if i >= 3 or len(valid_pairs) <= 3: axes[i].set_xlabel("Phase")
+                        if i % 3 == 0: axes[i].set_ylabel("Normalized Amplitude")
+                    else:
+                        axes[i].axis('off') # 隱藏沒有數據的子圖
+                        
                 plt.tight_layout()
                 st.pyplot(fig)
                 
-                # 6. MI 數值 CSV 匯出引擎
+                # 6. MI 數值動態 CSV 匯出引擎
                 st.divider()
                 st.subheader("💾 Export MI Values for current ROI")
                 df_mi = pd.DataFrame([mi_results], index=[f"ROI_{start_sec}s_to_{start_sec+actual_epoch_len}s"])
@@ -311,7 +314,7 @@ if uploaded_files:
                     data=csv_mi,
                     file_name=f"PAC_MI_{pac_ch}_{start_sec}s.csv",
                     mime="text/csv",
-                    help="Exports the Modulation Index (MI) calculated via Tort's method for the selected ROI slice."
+                    help="Exports the Modulation Index (MI) for valid frequency pairs in the current ROI slice."
                 )
 else:
     st.info("🔌 Pipeline Offline: Upload raw clinical EDF data to activate.")
