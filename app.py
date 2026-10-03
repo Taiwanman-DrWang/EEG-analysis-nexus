@@ -15,9 +15,9 @@ import os
 # ==========================================
 # 1. Page Configuration
 # ==========================================
-st.set_page_config(page_title="EEG NextGen Analytics V3.1", layout="wide")
-st.title("🧠 Next-Generation Academic Anesthesia EEG Platform (v3.1)")
-st.caption("Core Engine: Bilateral Analysis, Nyquist Defense, and Canonical Band Power Export")
+st.set_page_config(page_title="EEG NextGen Analytics V3.2", layout="wide")
+st.title("🧠 Next-Generation Academic Anesthesia EEG Platform (v3.2)")
+st.caption("Core Engine: Global ROI Navigator, Bilateral Analysis, Nyquist Defense, and Band Power Export")
 
 # ==========================================
 # 2. Sidebar Configuration
@@ -25,7 +25,7 @@ st.caption("Core Engine: Bilateral Analysis, Nyquist Defense, and Canonical Band
 st.sidebar.header("🎛️ Parameters")
 fmin_filter = st.sidebar.slider("High-pass (Hz)", 0.1, 1.0, 0.2, 0.1)
 fmax_filter = st.sidebar.slider("Low-pass (Hz)", 30, 100, 45, 5)
-win_sec = st.sidebar.slider("Window Size (sec)", 1, 10, 3, 1)
+win_sec = st.sidebar.slider("Window Size (sec)", 1, 10, 3, 1, help="STFT/Welch resolution. Will automatically adapt if ROI is shorter.")
 step_sec = st.sidebar.slider("Step Size (sec)", 1, 5, 1, 1)
 vmin = st.sidebar.slider("Min Power (dB)", -60, 0, -40, 5)
 vmax = st.sidebar.slider("Max Power (dB)", -20, 30, 10, 5)
@@ -77,10 +77,6 @@ if uploaded_files:
     if not selected_channels:
         st.warning("Please select at least one channel in the sidebar.")
         st.stop()
-
-    tab_raw, tab_fft, tab_stft, tab_fooof = st.tabs([
-        "📈 1. Raw Signals", "📊 2. FFT Power (Bilateral)", "⚡ 3. STFT Spectrograms", "🚀 4. Export & FOOOF"
-    ])
     
     ch_data_dict = {ch: [] for ch in selected_channels}
     fs = None
@@ -128,36 +124,62 @@ if uploaded_files:
     total_duration = len(full_signals[selected_channels[0]]) / fs
     time_axis = np.arange(len(full_signals[selected_channels[0]])) / fs
 
+    # ==========================================
+    # 全域 ROI 控制器 (Global ROI Navigator)
+    # ==========================================
+    st.markdown("---")
+    st.subheader("⏱️ Global Region of Interest (ROI) Navigator")
+    st.markdown("調整此區塊，將同步連動下方的 **Raw Signals**, **FFT**, 以及 **STFT Spectrograms** 與數據輸出。")
+    
+    col_t1, col_t2 = st.columns(2)
+    with col_t1:
+        start_sec = st.slider("Start Time (Seconds)", 0.0, float(max(0, total_duration - 3.0)), 0.0, 1.0)
+    with col_t2:
+        max_epoch = float(total_duration - start_sec)
+        epoch_len = st.slider("Epoch Duration (Seconds)", 3.0, max(3.0, max_epoch), min(60.0, max_epoch), 1.0)
+    
+    # 計算 ROI 切片的陣列邊界
+    idx_start = int(start_sec * fs)
+    idx_end = min(int((start_sec + epoch_len) * fs), len(full_signals[selected_channels[0]]))
+    actual_epoch_len = (idx_end - idx_start) / fs
+    
+    # 建立 ROI 專用的切割數據庫
+    sliced_signals = {ch: full_signals[ch][idx_start:idx_end] for ch in selected_channels}
+    sliced_time_axis = time_axis[idx_start:idx_end]
+    colors = ['#2c3e50', '#e74c3c', '#27ae60', '#8e44ad', '#d35400']
+
+    # 建立多功能分頁
+    tab_raw, tab_fft, tab_stft, tab_fooof = st.tabs([
+        "📈 1. Raw Signals", "📊 2. Localized FFT Power", "⚡ 3. ROI STFT Spectrograms", "🚀 4. Export & FOOOF"
+    ])
+
     # ---------------------------
-    # TAB 1: Raw Signals
+    # TAB 1: Raw Signals (連動 ROI)
     # ---------------------------
     with tab_raw:
-        st.header("📈 Bilateral Preprocessed Waveforms")
-        start_sec = st.slider("Select 10-sec Epoch (Start Time)", 0.0, float(total_duration - 10), 0.0, 1.0)
-        
+        st.header(f"📈 Bilateral Waveforms (ROI: {start_sec}s - {start_sec + actual_epoch_len}s)")
         fig, axes = plt.subplots(len(selected_channels), 1, figsize=(12, 2.5 * len(selected_channels)), sharex=True)
         axes = np.atleast_1d(axes)
         
-        idx_start, idx_end = int(start_sec * fs), int((start_sec + 10) * fs)
-        colors = ['#2c3e50', '#e74c3c', '#27ae60', '#8e44ad', '#d35400']
-        
         for i, ch in enumerate(selected_channels):
-            axes[i].plot(time_axis[idx_start:idx_end], full_signals[ch][idx_start:idx_end], color=colors[i%len(colors)], lw=1)
+            axes[i].plot(sliced_time_axis, sliced_signals[ch], color=colors[i%len(colors)], lw=1)
             axes[i].set_ylabel(ch)
             axes[i].grid(True, alpha=0.3)
-        axes[-1].set_xlabel("Time (Seconds)")
+        axes[-1].set_xlabel("Absolute Time (Seconds)")
         st.pyplot(fig)
 
     # ---------------------------
-    # TAB 2: Bilateral FFT
+    # TAB 2: Localized Bilateral FFT (連動 ROI)
     # ---------------------------
     with tab_fft:
-        st.header("📊 Global Welch PSD (Spatial Overlay)")
+        st.header(f"📊 Localized Welch PSD (ROI: {start_sec}s - {start_sec + actual_epoch_len}s)")
         fft_scale = st.radio("Y-Axis Scale:", ["Logarithmic (Log dB)", "Linear ($\mu V^2/Hz$)"], horizontal=True)
         
         fig, ax = plt.subplots(figsize=(10, 5))
         for i, ch in enumerate(selected_channels):
-            f_welch, p_welch = welch(full_signals[ch], fs=fs, nperseg=int(fs * win_sec))
+            # 動態防禦：確保 Welch 分析視窗不會大於切片長度
+            nperseg_val = min(int(fs * win_sec), len(sliced_signals[ch]))
+            f_welch, p_welch = welch(sliced_signals[ch], fs=fs, nperseg=nperseg_val)
             
             if "Logarithmic" in fft_scale:
                 ax.plot(f_welch, 10 * np.log10(p_welch + 1e-10), color=colors[i%len(colors)], lw=1.5, label=ch)
@@ -173,16 +195,14 @@ if uploaded_files:
         st.pyplot(fig)
 
     # ---------------------------
-    # TAB 3: Bilateral STFT & Export
+    # TAB 3: ROI STFT & Export (連動 ROI)
     # ---------------------------
     with tab_stft:
-        st.header("⚡ STFT Spectrogram Array")
+        st.header(f"⚡ STFT Spectrogram Array (ROI: {start_sec}s - {start_sec + actual_epoch_len}s)")
         fig, axes = plt.subplots(len(selected_channels), 1, figsize=(12, 3.5 * len(selected_channels)), sharex=True)
         axes = np.atleast_1d(axes)
         
         export_df_list = []
-        
-        # 建立要濃縮的頻段字典 (Canonical Frequency Bands)
         clinical_bands = {
             'Delta 0.5-4Hz': (0.5, 4),
             'Theta 4-8Hz': (4, 8),
@@ -191,49 +211,48 @@ if uploaded_files:
         }
         
         for i, ch in enumerate(selected_channels):
-            f_stft, t_stft, Zxx = stft(full_signals[ch], fs=fs, nperseg=int(fs*win_sec), noverlap=int(fs*(win_sec-step_sec)))
+            # 動態防禦：計算相容的 window 與 overlap
+            nperseg_val = min(int(fs * win_sec), len(sliced_signals[ch]))
+            noverlap_val = int(fs * (win_sec - step_sec))
+            if noverlap_val >= nperseg_val: noverlap_val = nperseg_val // 2
+            
+            f_stft, t_stft, Zxx = stft(sliced_signals[ch], fs=fs, nperseg=nperseg_val, noverlap=noverlap_val)
             psd_stft = np.abs(Zxx)**2
             
-            # 繪製原圖
+            # STFT 影像渲染 (X軸映射回真實時間範圍)
             im = axes[i].imshow(10 * np.log10(psd_stft + 1e-10), aspect='auto', origin='lower',
-                                extent=[0, total_duration, f_stft[0], f_stft[-1]], vmin=vmin, vmax=vmax, cmap=cmap)
+                                extent=[start_sec, start_sec + actual_epoch_len, f_stft[0], f_stft[-1]], 
+                                vmin=vmin, vmax=vmax, cmap=cmap)
             axes[i].set_ylim(safe_fmin, safe_fmax)
             axes[i].set_ylabel(f"{ch} Freq (Hz)")
             
-            # ---------------------------
-            # 科研頻段濃縮與匯出邏輯 (Band Power Aggregation)
-            # ---------------------------
+            # 頻段濃縮
             band_power_dict = {'Channel': ch}
             for band_name, (f_low, f_high) in clinical_bands.items():
-                # 找出落在該頻段內的所有頻率小數點索引
                 idx_band = (f_stft >= f_low) & (f_stft < f_high)
-                # 將這些細碎頻率的能量「垂直加總 (axis=0)」，濃縮為單一波段的總能量
                 band_power_dict[band_name] = np.sum(psd_stft[idx_band, :], axis=0)
                 
             df_ch = pd.DataFrame(band_power_dict)
-            
-            # 時間軸正規化：將複雜的中心秒數，強制轉為 1, 2, 3... 的相對紀元 (Epoch)
             df_ch.index = np.arange(1, len(t_stft) + 1)
-            
             export_df_list.append(df_ch)
             
-        axes[-1].set_xlabel("Time (Seconds)")
+        axes[-1].set_xlabel("Absolute Time within Full Recording (Seconds)")
         fig.colorbar(im, ax=axes.ravel().tolist(), label="Power (dB)")
         st.pyplot(fig)
         
-        # 整合匯出引擎 (Tidy Data)
+        # 整合匯出引擎 (Tidy Data) 專門針對目前的 ROI
         final_export_df = pd.concat(export_df_list)
-        final_export_df.index.name = "Relative_Time (Seconds/Epochs)"
+        final_export_df.index.name = "ROI_Relative_Epochs"
         csv_data = final_export_df.to_csv().encode('utf-8')
         
         st.divider()
-        st.subheader("💾 Statistical Export (Clinical Bands)")
+        st.subheader("💾 Export Focused Statistical Data (For current ROI only)")
         st.download_button(
-            label="📥 Download Multi-Channel Band Power Matrix (CSV)",
+            label="📥 Download ROI Band Power Matrix (CSV)",
             data=csv_data,
-            file_name="Bilateral_BandPower_Matrix.csv",
+            file_name=f"ROI_{start_sec}s_to_{start_sec + actual_epoch_len}s_BandPower.csv",
             mime="text/csv",
-            help="Tidy Data Format: Rows are normalized relative time (1, 2, 3...). Columns are grouped into canonical clinical bands. Values represent the absolute raw sum power for that band."
+            help="Exports data exclusively for the selected ROI slice. Perfect for comparing specific clinical events (e.g., pre-incision vs post-incision)."
         )
 else:
     st.info("🔌 Pipeline Offline: Upload raw clinical EDF data to activate.")
