@@ -16,9 +16,9 @@ import os
 # ==========================================
 # 1. Page Configuration
 # ==========================================
-st.set_page_config(page_title="EEG NextGen Analytics V4", layout="wide")
-st.title("🧠 Next-Generation Academic Anesthesia EEG Platform (v4.0)")
-st.caption("Core Engine: Global ROI Navigator, Bilateral FFT, and Advanced PAC (Tort's Modulation Index)")
+st.set_page_config(page_title="EEG NextGen Analytics V4.2", layout="wide")
+st.title("🧠 Next-Generation Academic Anesthesia EEG Platform (v4.2)")
+st.caption("Core Engine: Global ROI Navigator, Bilateral FFT, and Adaptive PAC Engine")
 
 # ==========================================
 # 2. Sidebar Configuration
@@ -192,25 +192,31 @@ if uploaded_files:
         fig.colorbar(im, ax=axes.ravel().tolist(), label="Power (dB)")
         st.pyplot(fig)
 
-# ---------------------------
+    # ---------------------------
     # TAB 4: Phase-Amplitude Coupling (PAC - Tort's MI)
     # ---------------------------
     with tab_pac:
         st.header("🌊 Cross-Frequency Phase-Amplitude Coupling (Tort's MI)")
         st.markdown(f"**Analyzing current ROI**: `{start_sec}s` to `{start_sec + actual_epoch_len}s`")
         
-        pac_ch = st.selectbox("🎯 Select Target Channel for PAC Analysis", selected_channels)
+        col_p1, col_p2 = st.columns([1, 2])
+        with col_p1:
+            pac_ch = st.selectbox("🎯 Select Target Channel", selected_channels)
+        with col_p2:
+            # 加入動態頻段適應器，完美解決 63Hz 撞牆期
+            beta_max = st.number_input("Beta Band Upper Limit (Hz)", min_value=20.0, max_value=50.0, value=30.0, step=1.0, 
+                                       help="Set to 30 Hz for files with 63Hz sampling rate to respect the Nyquist limit (~31.5Hz).")
         
         if st.button("🚀 Calculate PAC for current ROI"):
             with st.spinner("Hilbert Transform and Phase Binning in progress..."):
                 raw_roi_sig = sliced_signals[pac_ch]
                 
-                # 1. 學術級 Nyquist 篩選防禦
+                # 1. 寫入動態 Beta 上限
                 bands = {
                     'Delta': (0.5, 4),
                     'Theta': (4, 8),
                     'Alpha': (8, 14),
-                    'Beta':  (14, 32)
+                    'Beta':  (14, beta_max)
                 }
                 filtered_sigs = {}
                 nyq = fs / 2
@@ -218,7 +224,7 @@ if uploaded_files:
                 
                 for b_name, (low, high) in bands.items():
                     if high >= nyq - 0.5:
-                        st.warning(f"🚫 **頻段失效警告**: {b_name} 頻段上限 ({high}Hz) 已逼近或超過資料物理極限 Nyquist ({nyq:.1f}Hz)。為確保科學嚴謹性，該頻段 PAC 運算已自動捨棄。")
+                        st.warning(f"🚫 **頻段失效警告**: {b_name} 頻段上限 ({high}Hz) 逼近物理極限 Nyquist ({nyq:.1f}Hz)，已捨棄。請調低上方 Beta 上限參數。")
                     else:
                         b, a = butter(3, [low/nyq, high/nyq], btype='bandpass')
                         filtered_sigs[b_name] = filtfilt(b, a, raw_roi_sig)
@@ -243,7 +249,7 @@ if uploaded_files:
                 valid_pairs = [pair for pair in all_pairs if pair[0] in valid_bands and pair[1] in valid_bands]
                 
                 if not valid_pairs:
-                    st.error("❌ 採樣率過低，沒有足夠的有效頻段組合可進行 PAC 運算。")
+                    st.error("❌ 採樣率過低，且 Beta 上限設定過高，無有效頻段可運算。")
                     st.stop()
                 
                 mi_results, dist_results = {}, {}
@@ -274,7 +280,6 @@ if uploaded_files:
                 # 5. 動態渲染高解析度結果
                 st.subheader(f"Coupling Distribution & MI (Channel: {pac_ch})")
                 
-                # 根據剩餘的有效組合數量動態生成畫布
                 fig, axes = plt.subplots(2, 3, figsize=(15, 8))
                 axes = axes.flatten()
                 x_axis = np.linspace(-360, 360, 144) 
@@ -297,7 +302,7 @@ if uploaded_files:
                         if i >= 3 or len(valid_pairs) <= 3: axes[i].set_xlabel("Phase")
                         if i % 3 == 0: axes[i].set_ylabel("Normalized Amplitude")
                     else:
-                        axes[i].axis('off') # 隱藏沒有數據的子圖
+                        axes[i].axis('off') 
                         
                 plt.tight_layout()
                 st.pyplot(fig)
@@ -314,7 +319,7 @@ if uploaded_files:
                     data=csv_mi,
                     file_name=f"PAC_MI_{pac_ch}_{start_sec}s.csv",
                     mime="text/csv",
-                    help="Exports the Modulation Index (MI) for valid frequency pairs in the current ROI slice."
+                    help="Exports the Modulation Index (MI) for valid frequency pairs."
                 )
 else:
     st.info("🔌 Pipeline Offline: Upload raw clinical EDF data to activate.")
